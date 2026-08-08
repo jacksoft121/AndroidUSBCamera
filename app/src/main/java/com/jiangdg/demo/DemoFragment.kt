@@ -49,7 +49,10 @@ import com.jiangdg.ausbc.callback.ICameraStateCallBack
 import com.jiangdg.demo.databinding.FragmentDemoBinding
 import com.jiangdg.ausbc.callback.ICaptureCallBack
 import com.jiangdg.ausbc.callback.IPlayCallBack
+import com.jiangdg.ausbc.callback.IPreviewDataCallBack
 import com.jiangdg.ausbc.camera.CameraUVC
+import com.jiangdg.ausbc.camera.bean.CameraRequest
+import com.jiangdg.ausbc.render.env.RotateType
 import com.jiangdg.ausbc.render.effect.EffectBlackWhite
 import com.jiangdg.ausbc.render.effect.EffectSoul
 import com.jiangdg.ausbc.render.effect.EffectZoom
@@ -73,6 +76,38 @@ import java.util.*
  * @author Created by jiangdg on 2022/1/28
  */
 class DemoFragment : CameraFragment(), View.OnClickListener, CaptureMediaView.OnViewClickListener {
+    private val previewSafetyHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var hasFirstPreviewFrame = false
+
+    /**
+     * Stop a stalled UVC session before the vendor USB/graphics stack can remain
+     * blocked indefinitely. A successful native preview continuously supplies NV21 frames.
+     */
+    private val previewTimeoutRunnable = Runnable {
+        if (!hasFirstPreviewFrame && isCameraOpened()) {
+            Logger.e(TAG, "No UVC preview frame within 3 seconds; stop the unsafe session")
+            closeCamera()
+            handleCameraError("UVC preview timed out before the first frame")
+        }
+    }
+
+    private val previewDataCallBack = object : IPreviewDataCallBack {
+        override fun onPreviewData(
+            data: ByteArray?,
+            width: Int,
+            height: Int,
+            format: IPreviewDataCallBack.DataFormat
+        ) {
+            if (data != null && data.isNotEmpty() && !hasFirstPreviewFrame) {
+                hasFirstPreviewFrame = true
+                previewSafetyHandler.removeCallbacks(previewTimeoutRunnable)
+                Logger.i(TAG, "Received first UVC preview frame: ${width}x$height, format=$format")
+            }
+        }
+    }
+
     private var mMultiCameraDialog: MultiCameraDialog? = null
     private lateinit var mMoreBindingView: DialogMoreBinding
     private var mMoreMenu: PopupWindow? = null
@@ -148,6 +183,24 @@ class DemoFragment : CameraFragment(), View.OnClickListener, CaptureMediaView.On
     private var mCameraMode = CaptureMediaView.CaptureMode.MODE_CAPTURE_PIC
 
     private lateinit var mViewBinding: FragmentDemoBinding
+
+    /**
+     * Use native rendering at a conservative resolution. The actual output view
+     * must be a SurfaceView because native code locks and writes its ANativeWindow.
+     */
+    override fun getCameraRequest(): CameraRequest {
+        return CameraRequest.Builder()
+            .setPreviewWidth(640)
+            .setPreviewHeight(480)
+            .setRenderMode(CameraRequest.RenderMode.NORMAL)
+            .setDefaultRotateType(RotateType.ANGLE_0)
+            .setAudioSource(CameraRequest.AudioSource.SOURCE_SYS_MIC)
+            .setPreviewFormat(CameraRequest.PreviewFormat.FORMAT_MJPEG)
+            .setAspectRatioShow(true)
+            .setCaptureRawImage(false)
+            .setRawPreviewData(false)
+            .create()
+    }
 
     override fun initView() {
         super.initView()
@@ -246,18 +299,26 @@ class DemoFragment : CameraFragment(), View.OnClickListener, CaptureMediaView.On
     }
 
     private fun handleCameraError(msg: String?) {
+        previewSafetyHandler.removeCallbacks(previewTimeoutRunnable)
+        removePreviewDataCallBack(previewDataCallBack)
         mViewBinding.uvcLogoIv.visibility = View.VISIBLE
         mViewBinding.frameRateTv.visibility = View.GONE
         ToastUtils.show("camera opened error: $msg")
     }
 
     private fun handleCameraClosed() {
+        previewSafetyHandler.removeCallbacks(previewTimeoutRunnable)
+        removePreviewDataCallBack(previewDataCallBack)
         mViewBinding.uvcLogoIv.visibility = View.VISIBLE
         mViewBinding.frameRateTv.visibility = View.GONE
         ToastUtils.show("camera closed success")
     }
 
     private fun handleCameraOpened() {
+        hasFirstPreviewFrame = false
+        addPreviewDataCallBack(previewDataCallBack)
+        previewSafetyHandler.removeCallbacks(previewTimeoutRunnable)
+        previewSafetyHandler.postDelayed(previewTimeoutRunnable, 3_000L)
         mViewBinding.uvcLogoIv.visibility = View.GONE
         mViewBinding.frameRateTv.visibility = View.VISIBLE
         mViewBinding.brightnessSb.max = (getCurrentCamera() as? CameraUVC)?.getBrightnessMax() ?: 100
@@ -306,7 +367,9 @@ class DemoFragment : CameraFragment(), View.OnClickListener, CaptureMediaView.On
     }
 
     override fun getCameraView(): IAspectRatio {
-        return AspectRatioTextureView(requireContext())
+        // NORMAL mode writes RGBA frames through ANativeWindow_lock; SurfaceView
+        // provides the compatible producer surface and avoids TextureView deadlocks.
+        return AspectRatioSurfaceView(requireContext())
     }
 
     override fun getCameraViewContainer(): ViewGroup {
@@ -439,6 +502,8 @@ class DemoFragment : CameraFragment(), View.OnClickListener, CaptureMediaView.On
     }
 
     override fun onDestroyView() {
+        previewSafetyHandler.removeCallbacks(previewTimeoutRunnable)
+        removePreviewDataCallBack(previewDataCallBack)
         super.onDestroyView()
         mMultiCameraDialog?.hide()
     }

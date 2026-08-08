@@ -56,9 +56,20 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include "libusb.h"
 #include "libusbi.h"
 #include "android_usbfs.h"
+
+/*
+ * Some Android usbfs implementations advertise large bulk URBs but stall when
+ * a medium UVC IN request is split into BULK_CONTINUATION URBs. Keep the
+ * workaround bounded so genuinely large transfers retain upstream splitting.
+ */
+#define ANDROID_BULK_IN_SINGLE_URB_MAX_LENGTH (256 * 1024)
 
 /* sysfs vs usbfs:
  * opening a usbfs node causes the device to be resumed, so we attempt to
@@ -2172,6 +2183,17 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer) {
 		/* Good! Just submit everything in one go */
 		bulk_buffer_len = transfer->length ? transfer->length : 1;
 		use_bulk_continuation = 0;
+	} else if (!is_out
+			&& (dpriv->caps & USBFS_CAP_NO_PACKET_SIZE_LIM)
+			&& transfer->length > MAX_BULK_BUFFER_LENGTH
+			&& transfer->length <= ANDROID_BULK_IN_SINGLE_URB_MAX_LENGTH) {
+		/*
+		 * MediaTek Android 15 can accept one 200 KiB UVC bulk IN URB but
+		 * never completes the equivalent 13-URB continuation chain. A
+		 * bounded single URB also makes cancellation deterministic.
+		 */
+		bulk_buffer_len = transfer->length;
+		use_bulk_continuation = 0;
 	} else if (dpriv->caps & USBFS_CAP_BULK_CONTINUATION) {
 		/* Split the transfers and use bulk-continuation to
 		   avoid issues with short-transfers */
@@ -2200,6 +2222,17 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer) {
 		last_urb_partial = 1;
 		num_urbs++;
 	}
+#ifdef __ANDROID__
+	/* Log only the first submissions so device-specific usbfs splitting is visible. */
+	static volatile uint32_t bulk_diagnostic_count = 0;
+	const uint32_t diagnostic_count = __sync_add_and_fetch(&bulk_diagnostic_count, 1);
+	if (diagnostic_count <= 4) {
+		__android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+			"bulk submit #%u endpoint=0x%02x length=%d caps=0x%x chunk=%d urbs=%d continuation=%d",
+			diagnostic_count, transfer->endpoint, transfer->length, dpriv->caps,
+			bulk_buffer_len, num_urbs, use_bulk_continuation);
+	}
+#endif
 	usbi_dbg("need %d urbs for new transfer with length %d", num_urbs, transfer->length);
 	alloc_size = num_urbs * sizeof(struct usbfs_urb);
 	urbs = calloc(1, alloc_size);
@@ -2251,6 +2284,11 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer) {
 #endif
 		r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urb);
 		if (UNLIKELY(r < 0)) {
+#ifdef __ANDROID__
+			__android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+				"bulk submit failed endpoint=0x%02x length=%d urb=%d/%d errno=%d",
+				transfer->endpoint, transfer->length, i + 1, num_urbs, errno);
+#endif
 			if (errno == ENODEV) {
 				r = LIBUSB_ERROR_NO_DEVICE;
 			} else {

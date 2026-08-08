@@ -1,8 +1,9 @@
 // Top-level build file where you can add configuration options libuvccommon to all sub-projects/modules.
 buildscript {
     repositories {
-        google()
-        jcenter()
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/central" }
+        maven { url "https://maven.aliyun.com/repository/public" }
         maven { url "https://jitpack.io" }
     }
     dependencies {
@@ -14,8 +15,9 @@ buildscript {
 
 allprojects {
     repositories {
-        google()
-        jcenter()
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/central" }
+        maven { url "https://maven.aliyun.com/repository/public" }
         maven { url "https://jitpack.io" }
     }
 }

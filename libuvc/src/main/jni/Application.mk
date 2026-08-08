@@ -26,9 +26,9 @@
 # Note: Supporting GCC on NDK is already deprecated and GCC will be removed from NDK soon.
 #NDK_TOOLCHAIN_VERSION := 4.9
 
-APP_PLATFORM := android-14
-#APP_ABI :=arm64-v8a armeabi-v7a
-# /*if you want x86 or x86_64, please open it*/
-APP_ABI :=arm64-v8a armeabi-v7a x86 x86_64
+APP_PLATFORM := android-19
+# The target tablet is arm64; excluding legacy x86 avoids incompatible JPEG
+# assembler relocations when this old NDK build is run with NDK 25.
+APP_ABI := arm64-v8a armeabi-v7a
 #APP_OPTIM := debug
 APP_OPTIM := release

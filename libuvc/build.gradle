@@ -6,6 +6,14 @@ android {
 	compileSdkVersion rootProject.ext.versionCompiler
 	buildToolsVersion rootProject.ext.versionBuildTool
 
+	// Package the libraries produced by ndk-build. The checked-in jniLibs
+	// directory contains legacy binaries and must not shadow current JNI source.
+	sourceSets {
+		main {
+			jniLibs.srcDirs = ['src/main/libs']
+		}
+	}
+
 	compileOptions {
 		sourceCompatibility rootProject.ext.javaSourceCompatibility
 		targetCompatibility rootProject.ext.javaTargetCompatibility
@@ -57,7 +65,20 @@ task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
 	println('executing ndkBuild')
 	def ndkBuildPath = getNdkBuildPath();
 	commandLine ndkBuildPath, '-j8', '-C', file('src/main').absolutePath
+	doLast {
+		// UACAudio has no source in this module, so retain only that prebuilt
+		// library while all UVC/USB libraries come from the current source tree.
+		['arm64-v8a', 'armeabi-v7a'].each { abi ->
+			copy {
+				from file("src/main/jniLibs/${abi}/libUACAudio.so")
+				into file("src/main/libs/${abi}")
+			}
+		}
+	}
 }
+
+// Native libraries must exist before Android Gradle Plugin snapshots JNI inputs.
+preBuild.dependsOn ndkBuild
 
 task ndkClean(type: Exec, description: 'clean JNI libraries') {
 	println('executing ndkBuild clean')

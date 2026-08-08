@@ -10,3 +10,6 @@
 .externalNativeBuild
 .tags*
 .cxx/
+
+# Native outputs are rebuilt by libuvc:ndkBuild before APK packaging.
+/libuvc/src/main/libs/

@@ -969,6 +969,7 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	if UNLIKELY(!strmh) return;
 
 	int resubmit = 1;
+	const uint32_t callback_count = __sync_add_and_fetch(&strmh->transfer_callback_count, 1);
 
 #ifndef NDEBUG
 	static int cnt = 0;
@@ -977,6 +978,10 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 #endif
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
+		if (callback_count <= 3 || (callback_count % 500) == 0) {
+			LOGI("UVC USB transfer callback #%u: status=completed length=%d requested=%d isoPackets=%d",
+				callback_count, transfer->actual_length, transfer->length, transfer->num_iso_packets);
+		}
 		if (!transfer->num_iso_packets) {
 			/* This is a bulk mode transfer, so it just has one payload transfer */
 			_uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
@@ -991,6 +996,13 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	case LIBUSB_TRANSFER_CANCELLED:
 	case LIBUSB_TRANSFER_ERROR:
 		libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
+		{
+			const uint32_t errors = __sync_add_and_fetch(&strmh->transfer_error_count, 1);
+			if (errors <= 5) {
+				LOGW("UVC USB transfer stopped #%u: status=%d length=%d requested=%d",
+					errors, transfer->status, transfer->actual_length, transfer->length);
+			}
+		}
 		UVC_DEBUG("not retrying transfer, status = %d", transfer->status);
 //		MARK("not retrying transfer, status = %d", transfer->status);
 //		_uvc_delete_transfer(transfer);
@@ -999,13 +1011,23 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_STALL:
 	case LIBUSB_TRANSFER_OVERFLOW:
+		{
+			const uint32_t errors = __sync_add_and_fetch(&strmh->transfer_error_count, 1);
+			if (errors <= 5) {
+				LOGW("UVC USB transfer retry #%u: status=%d length=%d requested=%d",
+					errors, transfer->status, transfer->actual_length, transfer->length);
+			}
+		}
 		UVC_DEBUG("retrying transfer, status = %d", transfer->status);
 //		MARK("retrying transfer, status = %d", transfer->status);
 		break;
 	}
 
 	if (LIKELY(strmh->running && resubmit)) {
-		libusb_submit_transfer(transfer);
+		const int submit_result = libusb_submit_transfer(transfer);
+		if (UNLIKELY(submit_result != UVC_SUCCESS)) {
+			LOGE("UVC USB transfer resubmit failed: error=%d", submit_result);
+		}
 	} else {
 		// XXX delete non-reusing transfer
 		// real implementation of deleting transfer moves to _uvc_delete_transfer
@@ -1566,7 +1588,10 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 			libusb_set_iso_packet_lengths(transfer, endpoint_bytes_per_packet);
 		}
 	} else {
-		MARK("bulk transfer mode");
+		LOGI("UVC bulk stream: interface=%u endpoint=0x%02x payload=%u frame=%u interval=%u buffers=%d",
+			strmh->stream_if->bInterfaceNumber, format_desc->parent->bEndpointAddress,
+			strmh->cur_ctrl.dwMaxPayloadTransferSize, dwMaxVideoFrameSize,
+			strmh->cur_ctrl.dwFrameInterval, LIBUVC_NUM_TRANSFER_BUFS);
 		/** prepare for bulk transfer */
 		for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
 			transfer = libusb_alloc_transfer(0);

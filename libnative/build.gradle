@@ -5,6 +5,8 @@ plugins {
 
 android {
     compileSdkVersion 31
+    // Use the locally installed NDK to keep the native build offline and reproducible.
+    ndkVersion "25.1.8937393"
 
     defaultConfig {
         minSdkVersion 19

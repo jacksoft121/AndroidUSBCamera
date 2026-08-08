@@ -70,7 +70,12 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	captureQueu(NULL),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
-	callbackPixelBytes(2) {
+	callbackPixelBytes(2),
+	mRawFrameCount(0),
+	mRejectedFrameCount(0),
+	mRenderReadyFrameCount(0),
+	mDecodeFailureCount(0),
+	mJavaCallbackCount(0) {
 
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
@@ -339,6 +344,12 @@ int UVCPreview::startPreview() {
 
 	int result = EXIT_FAILURE;
 	if (!isRunning()) {
+		// Each physical USB session gets one bounded diagnostic window.
+		mRawFrameCount = 0;
+		mRejectedFrameCount = 0;
+		mRenderReadyFrameCount = 0;
+		mDecodeFailureCount = 0;
+		mJavaCallbackCount = 0;
 		mIsRunning = true;
 		pthread_mutex_lock(&preview_mutex);
 		{
@@ -409,15 +420,21 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 	if (UNLIKELY(
 		((frame->frame_format != UVC_FRAME_FORMAT_MJPEG) && (frame->actual_bytes < preview->frameBytes))
 		|| (frame->width != preview->frameWidth) || (frame->height != preview->frameHeight) )) {
-
-#if LOCAL_DEBUG
-		LOGD("broken frame!:format=%d,actual_bytes=%d/%d(%d,%d/%d,%d)",
-			frame->frame_format, frame->actual_bytes, preview->frameBytes,
-			frame->width, frame->height, preview->frameWidth, preview->frameHeight);
-#endif
+		const uint32_t rejected = __sync_add_and_fetch(&preview->mRejectedFrameCount, 1);
+		if (rejected <= 3) {
+			LOGW("Rejected UVC frame #%u: format=%d bytes=%zu/%zu size=%ux%u expected=%dx%d",
+				rejected, frame->frame_format, frame->actual_bytes, preview->frameBytes,
+				frame->width, frame->height, preview->frameWidth, preview->frameHeight);
+		}
 		return;
 	}
 	if (LIKELY(preview->isRunning())) {
+		const uint32_t raw_frames = __sync_add_and_fetch(&preview->mRawFrameCount, 1);
+		if (raw_frames == 1 || (raw_frames % 60) == 0) {
+			LOGI("Received raw UVC frame #%u: format=%d sequence=%u bytes=%zu/%zu size=%ux%u",
+				raw_frames, frame->frame_format, frame->sequence, frame->actual_bytes,
+				frame->data_bytes, frame->width, frame->height);
+		}
 		uvc_frame_t *copy = preview->get_frame(frame->data_bytes);
 		if (UNLIKELY(!copy)) {
 #if LOCAL_DEBUG
@@ -554,9 +571,17 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 					result = uvc_mjpeg2yuyv(frame_mjpeg, frame);   // MJPEG => yuyv
 					recycle_frame(frame_mjpeg);
 					if (LIKELY(!result)) {
+						const uint32_t ready = __sync_add_and_fetch(&mRenderReadyFrameCount, 1);
+						if (ready == 1) {
+							LOGI("Decoded first MJPEG UVC frame to YUYV");
+						}
 						frame = draw_preview_one(frame, &mPreviewWindow, uvc_any2rgbx, 4);
 						addCaptureFrame(frame);
 					} else {
+						const uint32_t failures = __sync_add_and_fetch(&mDecodeFailureCount, 1);
+						if (failures <= 3) {
+							LOGW("Failed to decode MJPEG UVC frame #%u: error=%d", failures, result);
+						}
 						recycle_frame(frame);
 					}
 				}
@@ -566,6 +591,10 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
+					const uint32_t ready = __sync_add_and_fetch(&mRenderReadyFrameCount, 1);
+					if (ready == 1) {
+						LOGI("Received first render-ready YUYV UVC frame");
+					}
 					frame = draw_preview_one(frame, &mPreviewWindow, uvc_any2rgbx, 4);
 					addCaptureFrame(frame);
 				}
@@ -582,6 +611,9 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	} else {
 		uvc_perror(result, "failed start_streaming");
 	}
+	LOGI("UVC preview summary: raw=%u rejected=%u renderReady=%u decodeFailures=%u javaCallbacks=%u",
+		mRawFrameCount, mRejectedFrameCount, mRenderReadyFrameCount,
+		mDecodeFailureCount, mJavaCallbackCount);
 
 	EXIT();
 }
@@ -909,6 +941,10 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame) {
 			jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
 			if (iframecallback_fields.onFrame) {
 				env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
+				const uint32_t callbacks = __sync_add_and_fetch(&mJavaCallbackCount, 1);
+				if (callbacks == 1) {
+					LOGI("Delivered first converted UVC frame to Java callback");
+				}
 			}
 			env->ExceptionClear();
 			env->DeleteLocalRef(buf);

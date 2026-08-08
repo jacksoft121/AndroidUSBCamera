@@ -247,7 +247,12 @@ typedef struct uvc_device_info {
   We could/should change this to allow reduce it to, say, 5 by default
   and then allow the user to change the number of buffers as required.
  */
-#define LIBUVC_NUM_TRANSFER_BUFS 10
+/*
+ * Keep only two large bulk reads outstanding on Android. Some MediaTek usbfs
+ * implementations stall or panic while cancelling the original 10 x 200 KiB
+ * queue; two buffers still cover continuous high-speed 640x480 streaming.
+ */
+#define LIBUVC_NUM_TRANSFER_BUFS 2
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -279,6 +284,9 @@ struct uvc_stream_handle {
   void *user_ptr;
   struct libusb_transfer *transfers[LIBUVC_NUM_TRANSFER_BUFS];
   uint8_t *transfer_bufs[LIBUVC_NUM_TRANSFER_BUFS];
+  /* Bounded diagnostics for device-specific usbfs transfer stalls. */
+  uint32_t transfer_callback_count;
+  uint32_t transfer_error_count;
   struct uvc_frame frame;
   enum uvc_frame_format frame_format;
 };
@@ -333,4 +341,3 @@ uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx);
 
 #endif // !def(LIBUVC_INTERNAL_H)
 /** @endcond */
-

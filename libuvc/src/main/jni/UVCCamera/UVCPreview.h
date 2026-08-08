@@ -26,6 +26,7 @@
 #define UVCPREVIEW_H_
 
 #include "libUVCCamera.h"
+#include <stdint.h>
 #include <pthread.h>
 #include <android/native_window.h>
 #include "objectarray.h"
@@ -85,6 +86,12 @@ private:
 	Fields_iframecallback iframecallback_fields;
 	int mPixelFormat;
 	size_t callbackPixelBytes;
+	// Per-session counters locate stalls without logging every camera frame.
+	volatile uint32_t mRawFrameCount;
+	volatile uint32_t mRejectedFrameCount;
+	volatile uint32_t mRenderReadyFrameCount;
+	volatile uint32_t mDecodeFailureCount;
+	volatile uint32_t mJavaCallbackCount;
 // improve performance by reducing memory allocation
 	pthread_mutex_t pool_mutex;
 	ObjectArray<uvc_frame_t *> mFramePool;
